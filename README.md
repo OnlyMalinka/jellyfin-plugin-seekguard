@@ -64,7 +64,8 @@ dotnet publish Jellyfin.Plugin.SeekGuard -c Release -o artifacts
 ```
 
 Releases are built by GitHub Actions: push a tag such as `v1.0.0` on `main` and the workflow attaches the
-zip to a release and adds the version to `manifest.json`. The tag message becomes the changelog.
+zip to a release and adds the version to `manifest.json`. Release notes come from the matching
+section of `CHANGELOG.md`, so add it before tagging.
 
 ## License
 
