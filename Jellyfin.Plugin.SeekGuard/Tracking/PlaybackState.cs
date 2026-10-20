@@ -11,15 +11,26 @@ namespace Jellyfin.Plugin.SeekGuard.Tracking;
 /// </remarks>
 public sealed class PlaybackState
 {
+    private static readonly long _resumeEarlyTolerance = TimeSpan.FromSeconds(5).Ticks;
+
+    private long? _awaitingResumeTicks;
+
     /// <summary>
     /// Initializes a new instance of the <see cref="PlaybackState"/> class.
     /// </summary>
     /// <param name="positionTicks">The first known playback position.</param>
     /// <param name="timestampUtc">When that position was reported.</param>
-    public PlaybackState(long positionTicks, DateTime timestampUtc)
+    /// <param name="resumeTicks">The resume point saved before playback started, if any.</param>
+    public PlaybackState(long positionTicks, DateTime timestampUtc, long? resumeTicks = null)
     {
         LastPositionTicks = positionTicks;
         LastSeenUtc = timestampUtc;
+
+        // Some clients start at 0 and seek to the resume point only after the player is ready.
+        if (resumeTicks > 0 && Math.Abs(positionTicks - resumeTicks.Value) > _resumeEarlyTolerance)
+        {
+            _awaitingResumeTicks = resumeTicks;
+        }
     }
 
     /// <summary>Gets the last reported position.</summary>
@@ -36,6 +47,9 @@ public sealed class PlaybackState
 
     /// <summary>Gets a value indicating whether a seek is pending confirmation.</summary>
     public bool IsGuarding => GuardedFromTicks.HasValue;
+
+    /// <summary>Gets a value indicating whether the client has not reached the saved resume point yet.</summary>
+    public bool IsAwaitingResume => _awaitingResumeTicks.HasValue;
 
     /// <summary>
     /// Feeds a new position report into the state.
@@ -62,6 +76,32 @@ public sealed class PlaybackState
 
         LastPositionTicks = positionTicks;
         LastSeenUtc = nowUtc;
+
+        if (_awaitingResumeTicks is long resume)
+        {
+            if (positionTicks >= resume - _resumeEarlyTolerance && positionTicks <= resume + options.MinJump.Ticks)
+            {
+                _awaitingResumeTicks = null;
+                return Observation.Resumed;
+            }
+
+            if (isJump)
+            {
+                // Seeking elsewhere before the resume point was reached: guard the resume point itself.
+                _awaitingResumeTicks = null;
+                from = resume;
+            }
+            else if (positionTicks >= options.MinJump.Ticks)
+            {
+                // Watching from the start instead of resuming.
+                _awaitingResumeTicks = null;
+                return Observation.Normal;
+            }
+            else
+            {
+                return Observation.AwaitingResume;
+            }
+        }
 
         if (isJump && isIntentionalSkip?.Invoke(from, positionTicks) == true)
         {

@@ -132,6 +132,48 @@ public class PlaybackStateTests
     }
 
     [Fact]
+    public void ClientSeekingToTheResumePointIsNotASeek()
+    {
+        var state = new PlaybackState(0, At(0), resumeTicks: Sec(288));
+        Assert.True(state.IsAwaitingResume);
+
+        Assert.Equal(Observation.AwaitingResume, state.Observe(0, At(1), _options));
+        Assert.Equal(Observation.Resumed, state.Observe(Sec(290), At(4), _options));
+        Assert.False(state.IsAwaitingResume);
+        Assert.False(state.IsGuarding);
+        Assert.Equal(Observation.Normal, state.Observe(Sec(300), At(14), _options));
+    }
+
+    [Fact]
+    public void StartingAtTheResumePointNeedsNoResumeSeek()
+    {
+        var state = new PlaybackState(Sec(288), At(0), resumeTicks: Sec(288));
+
+        Assert.False(state.IsAwaitingResume);
+        Assert.Equal(Observation.Normal, state.Observe(Sec(298), At(10), _options));
+    }
+
+    [Fact]
+    public void SeekElsewhereBeforeResumingIsGuardedFromTheResumePoint()
+    {
+        var state = new PlaybackState(0, At(0), resumeTicks: Sec(288));
+
+        Assert.Equal(Observation.GuardStarted, state.Observe(Sec(1650), At(5), _options));
+        Assert.Equal(Sec(288), state.GuardedFromTicks);
+        Assert.False(state.IsAwaitingResume);
+    }
+
+    [Fact]
+    public void WatchingFromTheStartInsteadOfResumingEndsTheWait()
+    {
+        var state = new PlaybackState(0, At(0), resumeTicks: Sec(288));
+
+        Assert.Equal(Observation.AwaitingResume, state.Observe(Sec(20), At(20), _options));
+        Assert.Equal(Observation.Normal, state.Observe(Sec(30), At(30), _options));
+        Assert.False(state.IsAwaitingResume);
+    }
+
+    [Fact]
     public void ClockGoingBackwardsIsTolerated()
     {
         var state = new PlaybackState(Sec(600), At(10));

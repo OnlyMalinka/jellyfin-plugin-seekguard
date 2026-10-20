@@ -19,4 +19,10 @@ public enum Observation
 
     /// <summary>Enough was watched after the seek; the new position may be saved.</summary>
     GuardConfirmed,
+
+    /// <summary>The client started before the saved resume point and has not seeked to it yet.</summary>
+    AwaitingResume,
+
+    /// <summary>The client reached the saved resume point; this is not a user seek.</summary>
+    Resumed,
 }

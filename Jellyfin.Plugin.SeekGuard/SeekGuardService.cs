@@ -32,6 +32,7 @@ public sealed class SeekGuardService : IHostedService
     private static readonly TimeSpan _segmentStartSlack = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan _segmentEndSlack = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan _staleAfter = TimeSpan.FromHours(12);
+    private static readonly TimeSpan _startSnapshotLifetime = TimeSpan.FromMinutes(2);
 
     private readonly ISessionManager _sessionManager;
     private readonly IUserDataManager _userDataManager;
@@ -39,6 +40,7 @@ public sealed class SeekGuardService : IHostedService
     private readonly IMediaSegmentManager _mediaSegmentManager;
     private readonly ILogger<SeekGuardService> _logger;
     private readonly ConcurrentDictionary<string, TrackedPlayback> _playbacks = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<(Guid UserId, Guid ItemId), (UserDataSnapshot Snapshot, DateTime SavedUtc)> _startSnapshots = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SeekGuardService"/> class.
@@ -71,6 +73,7 @@ public sealed class SeekGuardService : IHostedService
         _sessionManager.PlaybackProgress += OnPlaybackProgress;
         _sessionManager.PlaybackStopped += OnPlaybackStopped;
         _sessionManager.SessionEnded += OnSessionEnded;
+        _userDataManager.UserDataSaved += OnUserDataSaved;
         return Task.CompletedTask;
     }
 
@@ -81,7 +84,9 @@ public sealed class SeekGuardService : IHostedService
         _sessionManager.PlaybackProgress -= OnPlaybackProgress;
         _sessionManager.PlaybackStopped -= OnPlaybackStopped;
         _sessionManager.SessionEnded -= OnSessionEnded;
+        _userDataManager.UserDataSaved -= OnUserDataSaved;
         _playbacks.Clear();
+        _startSnapshots.Clear();
         return Task.CompletedTask;
     }
 
@@ -109,6 +114,16 @@ public sealed class SeekGuardService : IHostedService
             && e.Item is not null
             && e.Item.SupportsPositionTicksResume
             && e.Users is { Count: > 0 };
+
+    // Jellyfin saves the play state when playback starts, before any progress report. Its position is still the
+    // resume point from the previous playback, whereas the first progress reports of clients that start at 0 save 0.
+    private void OnUserDataSaved(object? sender, UserDataSaveEventArgs e)
+    {
+        if (e.SaveReason == UserDataSaveReason.PlaybackStart && e.Item is not null && e.UserData is not null)
+        {
+            _startSnapshots[(e.UserId, e.Item.Id)] = (UserDataSnapshot.From(e.UserData), DateTime.UtcNow);
+        }
+    }
 
     private async void OnPlaybackStart(object? sender, PlaybackProgressEventArgs e)
     {
@@ -155,7 +170,16 @@ public sealed class SeekGuardService : IHostedService
             if (!_playbacks.TryGetValue(key, out var playback))
             {
                 // Progress arrived before the queued start event: start tracking from here.
-                _playbacks.TryAdd(key, CreatePlayback(item, e.Users, position));
+                playback = _playbacks.GetOrAdd(key, _ => CreatePlayback(item, e.Users, position));
+                lock (playback)
+                {
+                    if (playback.State.IsAwaitingResume)
+                    {
+                        // This report has just saved a position before the resume point; put the resume point back.
+                        Restore(playback);
+                    }
+                }
+
                 return;
             }
 
@@ -165,6 +189,7 @@ public sealed class SeekGuardService : IHostedService
                 switch (observation)
                 {
                     case Observation.Normal:
+                    case Observation.Resumed:
                         playback.TakeSnapshots(_userDataManager);
                         break;
                     case Observation.GuardConfirmed:
@@ -218,7 +243,7 @@ public sealed class SeekGuardService : IHostedService
                     playback.State.Observe(position, DateTime.UtcNow, CreateOptions(config), playback.IsSegmentSkip);
                 }
 
-                if (playback.State.IsGuarding)
+                if (playback.State.IsGuarding || playback.State.IsAwaitingResume)
                 {
                     LogRestore(playback, "playback stopped");
                     Restore(playback);
@@ -242,7 +267,7 @@ public sealed class SeekGuardService : IHostedService
                 {
                     lock (playback)
                     {
-                        if (playback.State.IsGuarding)
+                        if (playback.State.IsGuarding || playback.State.IsAwaitingResume)
                         {
                             LogRestore(playback, "session ended");
                             Restore(playback);
@@ -259,8 +284,27 @@ public sealed class SeekGuardService : IHostedService
 
     private TrackedPlayback CreatePlayback(BaseItem item, IReadOnlyList<User> users, long positionTicks)
     {
-        var playback = new TrackedPlayback(item, users.ToArray(), new PlaybackState(positionTicks, DateTime.UtcNow));
-        playback.TakeSnapshots(_userDataManager);
+        var now = DateTime.UtcNow;
+        var snapshots = new Dictionary<Guid, UserDataSnapshot>();
+        foreach (var user in users)
+        {
+            if (_startSnapshots.TryRemove((user.Id, item.Id), out var saved) && now - saved.SavedUtc < _startSnapshotLifetime)
+            {
+                snapshots[user.Id] = saved.Snapshot;
+            }
+            else if (_userDataManager.GetUserData(user, item) is { } data)
+            {
+                snapshots[user.Id] = UserDataSnapshot.From(data);
+            }
+        }
+
+        var resumeTicks = snapshots.Values.FirstOrDefault()?.PlaybackPositionTicks;
+        var playback = new TrackedPlayback(item, users.ToArray(), new PlaybackState(positionTicks, now, resumeTicks));
+        foreach (var pair in snapshots)
+        {
+            playback.Snapshots[pair.Key] = pair.Value;
+        }
+
         return playback;
     }
 
@@ -296,10 +340,15 @@ public sealed class SeekGuardService : IHostedService
 
     private void RemoveStale()
     {
-        var threshold = DateTime.UtcNow - _staleAfter;
-        foreach (var pair in _playbacks.Where(p => p.Value.State.LastSeenUtc < threshold))
+        var now = DateTime.UtcNow;
+        foreach (var pair in _playbacks.Where(p => now - p.Value.State.LastSeenUtc > _staleAfter))
         {
             _playbacks.TryRemove(pair.Key, out _);
+        }
+
+        foreach (var pair in _startSnapshots.Where(p => now - p.Value.SavedUtc > _startSnapshotLifetime))
+        {
+            _startSnapshots.TryRemove(pair.Key, out _);
         }
     }
 
