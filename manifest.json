@@ -1,0 +1,11 @@
+[
+  {
+    "guid": "9a65c308-5ee9-4061-9459-cd8ae08b91c8",
+    "name": "Seek Guard",
+    "description": "Keeps your resume point when you seek by accident. After a seek, the saved position stays where it was until the new position has actually been watched for a few seconds, so a stray tap on the timeline right before closing the app no longer loses your place.",
+    "overview": "Ignore accidental seeks when saving playback progress",
+    "owner": "OnlyMalinka",
+    "category": "General",
+    "versions": []
+  }
+]

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Seek Guard</title>
+</head>
+<body>
+    <div id="SeekGuardConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="SeekGuardConfigForm">
+                    <div class="verticalSection verticalSection-extrabottompadding">
+                        <h2 class="sectionTitle">Seek Guard</h2>
+                        <p>After a seek the resume point stays where it was until the new position has actually been watched.
+                            An accidental tap on the timeline right before closing the app no longer loses your place.</p>
+                    </div>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label class="emby-checkbox-label">
+                            <input id="Enabled" name="Enabled" type="checkbox" is="emby-checkbox" />
+                            <span>Enabled</span>
+                        </label>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="MinJumpSeconds">Minimum seek, seconds</label>
+                        <input id="MinJumpSeconds" name="MinJumpSeconds" type="number" is="emby-input" min="1" required />
+                        <div class="fieldDescription">Smaller position changes, like the 10-second skip buttons, are saved as usual.</div>
+                    </div>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="ConfirmSeconds">Watch after a seek, seconds</label>
+                        <input id="ConfirmSeconds" name="ConfirmSeconds" type="number" is="emby-input" min="1" required />
+                        <div class="fieldDescription">How long playback must continue after a seek before the new position replaces the resume point.</div>
+                    </div>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label class="emby-checkbox-label">
+                            <input id="TrustSegmentSkips" name="TrustSegmentSkips" type="checkbox" is="emby-checkbox" />
+                            <span>Save segment skips right away</span>
+                        </label>
+                        <div class="fieldDescription checkboxFieldDescription">Skipping an intro, recap or credits (media segments, e.g. from Intro Skipper) is treated as deliberate.</div>
+                    </div>
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <script type="text/javascript">
+            var SeekGuardConfig = {
+                pluginUniqueId: '9a65c308-5ee9-4061-9459-cd8ae08b91c8'
+            };
+
+            document.querySelector('#SeekGuardConfigPage')
+                .addEventListener('pageshow', function () {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(SeekGuardConfig.pluginUniqueId).then(function (config) {
+                        document.querySelector('#Enabled').checked = config.Enabled;
+                        document.querySelector('#MinJumpSeconds').value = config.MinJumpSeconds;
+                        document.querySelector('#ConfirmSeconds').value = config.ConfirmSeconds;
+                        document.querySelector('#TrustSegmentSkips').checked = config.TrustSegmentSkips;
+                        Dashboard.hideLoadingMsg();
+                    });
+                });
+
+            document.querySelector('#SeekGuardConfigForm')
+                .addEventListener('submit', function (e) {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(SeekGuardConfig.pluginUniqueId).then(function (config) {
+                        config.Enabled = document.querySelector('#Enabled').checked;
+                        config.MinJumpSeconds = parseInt(document.querySelector('#MinJumpSeconds').value, 10);
+                        config.ConfirmSeconds = parseInt(document.querySelector('#ConfirmSeconds').value, 10);
+                        config.TrustSegmentSkips = document.querySelector('#TrustSegmentSkips').checked;
+                        ApiClient.updatePluginConfiguration(SeekGuardConfig.pluginUniqueId, config).then(function (result) {
+                            Dashboard.processPluginConfigurationUpdateResult(result);
+                        });
+                    });
+
+                    e.preventDefault();
+                    return false;
+                });
+        </script>
+    </div>
+</body>
+</html>

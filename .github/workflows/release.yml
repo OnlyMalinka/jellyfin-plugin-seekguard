@@ -1,0 +1,79 @@
+name: Release
+
+# Push a tag like v1.2.0 to build the plugin, attach it to a GitHub release
+# and add the version to manifest.json, which Jellyfin reads as a plugin repository.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Resolve version
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          IFS=. read -r major minor patch build <<< "$tag"
+          echo "version=${major}.${minor:-0}.${patch:-0}.${build:-0}" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: dotnet test --configuration Release
+
+      - name: Package
+        id: package
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          dotnet publish Jellyfin.Plugin.SeekGuard --configuration Release -p:Version="$version" --output publish
+          zip -j "seek-guard_${version}.zip" publish/Jellyfin.Plugin.SeekGuard.dll
+          echo "zip=seek-guard_${version}.zip" >> "$GITHUB_OUTPUT"
+          echo "checksum=$(md5sum "seek-guard_${version}.zip" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --depth=1 origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          gh release create "$GITHUB_REF_NAME" "${{ steps.package.outputs.zip }}" --title "$GITHUB_REF_NAME" --notes-file notes.md
+
+      - name: Update manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+          SOURCE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.package.outputs.zip }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, pathlib
+          from datetime import datetime, timezone
+
+          path = pathlib.Path("manifest.json")
+          manifest = json.loads(path.read_text(encoding="utf-8"))
+          changelog = pathlib.Path("notes.md").read_text(encoding="utf-8").strip()
+          plugin = manifest[0]
+          plugin["versions"] = [v for v in plugin["versions"] if v["version"] != os.environ["VERSION"]]
+          plugin["versions"].insert(0, {
+              "version": os.environ["VERSION"],
+              "changelog": changelog,
+              "targetAbi": "12.0.0.0",
+              "sourceUrl": os.environ["SOURCE_URL"],
+              "checksum": os.environ["CHECKSUM"],
+              "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          })
+          path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Add ${VERSION} to manifest"
+          git push origin main
