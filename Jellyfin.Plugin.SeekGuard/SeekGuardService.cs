@@ -137,9 +137,10 @@ public sealed class SeekGuardService : IHostedService
             RemoveStale();
 
             var item = GetProgressItem(e.Item, e.MediaSourceId);
-            var playback = _playbacks.GetOrAdd(
+            var playback = _playbacks.AddOrUpdate(
                 GetKey(e.Session, item),
-                _ => CreatePlayback(item, e.Users, e.PlaybackPositionTicks ?? 0));
+                _ => CreatePlayback(item, e.Users, e.PlaybackPositionTicks ?? 0),
+                (_, existing) => existing.IsStopped ? CreatePlayback(item, e.Users, e.PlaybackPositionTicks ?? 0) : existing);
 
             if (Config.TrustSegmentSkips)
             {
@@ -185,6 +186,10 @@ public sealed class SeekGuardService : IHostedService
 
             lock (playback)
             {
+                // Progress after a stop without a new start: the server stopped an idle (long paused) session
+                // and the client carried on. Keep comparing against where it was.
+                playback.IsStopped = false;
+
                 var observation = playback.State.Observe(position, DateTime.UtcNow, CreateOptions(config), playback.IsSegmentSkip);
                 switch (observation)
                 {
@@ -230,7 +235,10 @@ public sealed class SeekGuardService : IHostedService
             }
 
             var item = GetProgressItem(e.Item, e.MediaSourceId);
-            if (!_playbacks.TryRemove(GetKey(e.Session, item), out var playback))
+
+            // The state is kept after a stop: when the server stops a session that was paused for too long,
+            // the client resumes without reporting a new start, and its next stop must still be checked.
+            if (!_playbacks.TryGetValue(GetKey(e.Session, item), out var playback))
             {
                 return;
             }
@@ -248,6 +256,12 @@ public sealed class SeekGuardService : IHostedService
                     LogRestore(playback, "playback stopped");
                     Restore(playback);
                 }
+                else
+                {
+                    playback.TakeSnapshots(_userDataManager);
+                }
+
+                playback.IsStopped = true;
             }
         }
         catch (Exception ex)
@@ -370,6 +384,8 @@ public sealed class SeekGuardService : IHostedService
         public Dictionary<Guid, UserDataSnapshot> Snapshots { get; } = new();
 
         public IReadOnlyList<MediaSegmentDto> Segments { get; set; } = [];
+
+        public bool IsStopped { get; set; }
 
         public void TakeSnapshots(IUserDataManager userDataManager)
         {

@@ -174,6 +174,16 @@ public class PlaybackStateTests
     }
 
     [Fact]
+    public void SeekToTheEndAfterALongPauseIsASeek()
+    {
+        // Paused at 9:25 for longer than the server's idle timeout, then resumed and seeked near the end.
+        var state = new PlaybackState(Sec(565), At(0));
+
+        Assert.Equal(Observation.GuardStarted, state.Observe(Sec(3449), At(140), _options));
+        Assert.Equal(Sec(565), state.GuardedFromTicks);
+    }
+
+    [Fact]
     public void ClockGoingBackwardsIsTolerated()
     {
         var state = new PlaybackState(Sec(600), At(10));
