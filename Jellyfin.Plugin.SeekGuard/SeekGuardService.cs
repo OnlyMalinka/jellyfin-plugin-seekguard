@@ -274,19 +274,21 @@ public sealed class SeekGuardService : IHostedService
     {
         try
         {
+            // The state is kept: a client closing its connection (a browser tab, for example) may still send its
+            // stop report after the session has ended. Stale entries are dropped on a later playback start.
             var prefix = e.SessionInfo.Id + ":";
-            foreach (var key in _playbacks.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)))
+            foreach (var pair in _playbacks.Where(p => p.Key.StartsWith(prefix, StringComparison.Ordinal)))
             {
-                if (_playbacks.TryRemove(key, out var playback))
+                var playback = pair.Value;
+                lock (playback)
                 {
-                    lock (playback)
+                    if (!playback.IsStopped && (playback.State.IsGuarding || playback.State.IsAwaitingResume))
                     {
-                        if (playback.State.IsGuarding || playback.State.IsAwaitingResume)
-                        {
-                            LogRestore(playback, "session ended");
-                            Restore(playback);
-                        }
+                        LogRestore(playback, "session ended");
+                        Restore(playback);
                     }
+
+                    playback.IsStopped = true;
                 }
             }
         }
