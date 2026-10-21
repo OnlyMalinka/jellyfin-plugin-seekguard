@@ -8,6 +8,14 @@
     "category": "General",
     "versions": [
       {
+        "version": "1.0.1.0",
+        "changelog": "- Fix: an accidental seek was saved after a long pause. Jellyfin stops a session that has been paused for more than 5 minutes, and clients resume without reporting a new start; Seek Guard now keeps tracking that playback.\n- Fix: closing a Jellyfin Web tab right after a seek saved the new position and could mark the episode watched, because the browser's stop report arrives after the session has ended.",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/OnlyMalinka/jellyfin-plugin-seekguard/releases/download/v1.0.1/seek-guard_1.0.1.0.zip",
+        "checksum": "f7132f094b15ad92a575ca87d3ebaab4",
+        "timestamp": "2026-10-21T14:14:20Z"
+      },
+      {
         "version": "1.0.0.0",
         "changelog": "- First release: after a seek, the resume point stays where it was until the new position has been watched.\n- Settings for the minimum seek, the watch time needed to confirm a seek, and trusting media segment skips.",
         "targetAbi": "12.0.0.0",
