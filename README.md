@@ -55,6 +55,8 @@ position before the seek.
   on the item being played, but other versions of the same movie that Jellyfin marked at the same time stay
   marked.
 - Clients that report progress rarely confirm a seek later than the configured time.
+- Tracking lives in memory. If Jellyfin restarts in the middle of an episode, a seek in that episode is
+  not guarded until playback is started again.
 
 ## Building
 
