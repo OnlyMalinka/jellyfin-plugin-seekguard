@@ -8,6 +8,14 @@
     "category": "General",
     "versions": [
       {
+        "version": "1.0.2.0",
+        "changelog": "- Fix: a device that wakes up with an old playback (a tablet left paused overnight, for example) could overwrite progress made on another device, turning a finished episode back into \"in progress\". Its report now counts as a seek away from the state the other device saved.\n- Starting playback away from the saved resume point (a stale position cached by the client, or playing from the beginning) is confirmed by watching, like a seek.\n- Playback is tracked per user, device and item, so it survives the client reconnecting with a new session.",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/OnlyMalinka/jellyfin-plugin-seekguard/releases/download/v1.0.2/seek-guard_1.0.2.0.zip",
+        "checksum": "53e4adc5e9b9eb747612e442d4e4cf2a",
+        "timestamp": "2026-10-22T16:12:52Z"
+      },
+      {
         "version": "1.0.1.0",
         "changelog": "- Fix: an accidental seek was saved after a long pause. Jellyfin stops a session that has been paused for more than 5 minutes, and clients resume without reporting a new start; Seek Guard now keeps tracking that playback.\n- Fix: closing a Jellyfin Web tab right after a seek saved the new position and could mark the episode watched, because the browser's stop report arrives after the session has ended.",
         "targetAbi": "12.0.0.0",
