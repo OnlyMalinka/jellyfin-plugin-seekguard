@@ -45,6 +45,9 @@ these events for each playback session:
 - Once *Watch after a seek* seconds have been played after the seek, the plugin stops interfering and the
   real position is saved by Jellyfin as usual.
 - Several seeks in a row (scrubbing) keep the position from before the first one.
+- Starting playback away from the saved resume point counts as a seek too. So does a device that wakes up
+  with an old playback after another device has saved newer progress (for example, a tablet left paused
+  overnight on an episode you have since finished on your phone).
 
 Pausing after a seek does not confirm it. If you seek on purpose, pause and leave, you will resume from the
 position before the seek.

@@ -31,7 +31,7 @@ public sealed class SeekGuardService : IHostedService
 {
     private static readonly TimeSpan _segmentStartSlack = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan _segmentEndSlack = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan _staleAfter = TimeSpan.FromHours(12);
+    private static readonly TimeSpan _staleAfter = TimeSpan.FromDays(3);
     private static readonly TimeSpan _startSnapshotLifetime = TimeSpan.FromMinutes(2);
 
     private readonly ISessionManager _sessionManager;
@@ -39,8 +39,14 @@ public sealed class SeekGuardService : IHostedService
     private readonly ILibraryManager _libraryManager;
     private readonly IMediaSegmentManager _mediaSegmentManager;
     private readonly ILogger<SeekGuardService> _logger;
+
+    // Keyed by user, device and item rather than by session: sessions are replaced when a client reconnects,
+    // but a device that wakes up still reports the playback it had before.
     private readonly ConcurrentDictionary<string, TrackedPlayback> _playbacks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<(Guid UserId, Guid ItemId), (UserDataSnapshot Snapshot, DateTime SavedUtc)> _startSnapshots = new();
+
+    // The play state this plugin last accepted for each user and item, and which device produced it.
+    private readonly ConcurrentDictionary<(Guid UserId, Guid ItemId), AcceptedState> _accepted = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SeekGuardService"/> class.
@@ -87,13 +93,17 @@ public sealed class SeekGuardService : IHostedService
         _userDataManager.UserDataSaved -= OnUserDataSaved;
         _playbacks.Clear();
         _startSnapshots.Clear();
+        _accepted.Clear();
         return Task.CompletedTask;
     }
 
     private static GuardOptions CreateOptions(PluginConfiguration config)
         => new(TimeSpan.FromSeconds(Math.Max(1, config.MinJumpSeconds)), TimeSpan.FromSeconds(Math.Max(1, config.ConfirmSeconds)));
 
-    private static string GetKey(SessionInfo session, BaseItem item) => session.Id + ":" + item.Id.ToString("N");
+    private static string GetDeviceKey(SessionInfo session)
+        => session.UserId.ToString("N") + ":" + (string.IsNullOrEmpty(session.DeviceId) ? session.Id : session.DeviceId);
+
+    private static string GetKey(string deviceKey, BaseItem item) => deviceKey + ":" + item.Id.ToString("N");
 
     // Mirrors SessionManager.GetProgressItem: progress of an alternate version is stored on that version.
     private static BaseItem GetProgressItem(BaseItem libraryItem, string? mediaSourceId)
@@ -137,10 +147,15 @@ public sealed class SeekGuardService : IHostedService
             RemoveStale();
 
             var item = GetProgressItem(e.Item, e.MediaSourceId);
+            var deviceKey = GetDeviceKey(e.Session);
+            var position = e.PlaybackPositionTicks ?? 0;
+
+            // A start begins a new playback, unless progress for this very playback overtook the queued start event.
             var playback = _playbacks.AddOrUpdate(
-                GetKey(e.Session, item),
-                _ => CreatePlayback(item, e.Users, e.PlaybackPositionTicks ?? 0),
-                (_, existing) => existing.IsStopped ? CreatePlayback(item, e.Users, e.PlaybackPositionTicks ?? 0) : existing);
+                GetKey(deviceKey, item),
+                _ => CreatePlayback(item, e.Users, e.Session, deviceKey, position),
+                (_, existing) => existing.WaitingForStart ? existing : CreatePlayback(item, e.Users, e.Session, deviceKey, position));
+            playback.WaitingForStart = false;
 
             if (Config.TrustSegmentSkips)
             {
@@ -167,16 +182,32 @@ public sealed class SeekGuardService : IHostedService
             }
 
             var item = GetProgressItem(e.Item, e.MediaSourceId);
-            var key = GetKey(e.Session, item);
-            if (!_playbacks.TryGetValue(key, out var playback))
+            var deviceKey = GetDeviceKey(e.Session);
+            var key = GetKey(deviceKey, item);
+            _playbacks.TryGetValue(key, out var existing);
+
+            if (FromOtherDevice(existing, e.Users, item, deviceKey) is { } accepted)
+            {
+                // This device reports a playback it had before another device moved on: compare against that.
+                var replacement = CreateFromAccepted(item, e.Users, e.Session, deviceKey, accepted);
+                _playbacks[key] = replacement;
+                lock (replacement)
+                {
+                    HandleProgress(replacement, position, config);
+                }
+
+                return;
+            }
+
+            if (existing is null)
             {
                 // Progress arrived before the queued start event: start tracking from here.
-                playback = _playbacks.GetOrAdd(key, _ => CreatePlayback(item, e.Users, position));
+                var playback = _playbacks.GetOrAdd(key, _ => CreatePlayback(item, e.Users, e.Session, deviceKey, position, waitingForStart: true));
                 lock (playback)
                 {
                     if (playback.State.IsAwaitingResume)
                     {
-                        // This report has just saved a position before the resume point; put the resume point back.
+                        // This report has just saved a position away from the resume point; put the resume point back.
                         Restore(playback);
                     }
                 }
@@ -184,43 +215,48 @@ public sealed class SeekGuardService : IHostedService
                 return;
             }
 
-            lock (playback)
+            lock (existing)
             {
-                // Progress after a stop without a new start: the server stopped an idle (long paused) session
-                // and the client carried on. Keep comparing against where it was.
-                playback.IsStopped = false;
-
-                var observation = playback.State.Observe(position, DateTime.UtcNow, CreateOptions(config), playback.IsSegmentSkip);
-                switch (observation)
-                {
-                    case Observation.Normal:
-                    case Observation.Resumed:
-                        playback.TakeSnapshots(_userDataManager);
-                        break;
-                    case Observation.GuardConfirmed:
-                        _logger.LogInformation(
-                            "Seek Guard: seek in '{Item}' confirmed by watching, saving {Position}",
-                            item.Name,
-                            TimeSpan.FromTicks(position));
-                        playback.TakeSnapshots(_userDataManager);
-                        break;
-                    case Observation.GuardStarted:
-                        _logger.LogInformation(
-                            "Seek Guard: seek in '{Item}' from {From} to {To}, keeping the old resume point until it is watched",
-                            item.Name,
-                            TimeSpan.FromTicks(playback.State.GuardedFromTicks ?? 0),
-                            TimeSpan.FromTicks(position));
-                        Restore(playback);
-                        break;
-                    default:
-                        Restore(playback);
-                        break;
-                }
+                HandleProgress(existing, position, config);
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Seek Guard failed to handle playback progress");
+        }
+    }
+
+    private void HandleProgress(TrackedPlayback playback, long position, PluginConfiguration config)
+    {
+        // Progress after a stop without a new start: the server stopped an idle (long paused) session
+        // and the client carried on. Keep comparing against where it was.
+        playback.IsStopped = false;
+
+        var observation = playback.State.Observe(position, DateTime.UtcNow, CreateOptions(config), playback.IsSegmentSkip);
+        switch (observation)
+        {
+            case Observation.Normal:
+            case Observation.Resumed:
+                Accept(playback);
+                break;
+            case Observation.GuardConfirmed:
+                _logger.LogInformation(
+                    "Seek Guard: new position in '{Item}' confirmed by watching, saving {Position}",
+                    playback.Item.Name,
+                    TimeSpan.FromTicks(position));
+                Accept(playback);
+                break;
+            case Observation.GuardStarted:
+                _logger.LogInformation(
+                    "Seek Guard: seek in '{Item}' from {From} to {To}, keeping the old resume point until it is watched",
+                    playback.Item.Name,
+                    TimeSpan.FromTicks(playback.State.GuardedFromTicks ?? 0),
+                    TimeSpan.FromTicks(position));
+                Restore(playback);
+                break;
+            default:
+                Restore(playback);
+                break;
         }
     }
 
@@ -235,10 +271,20 @@ public sealed class SeekGuardService : IHostedService
             }
 
             var item = GetProgressItem(e.Item, e.MediaSourceId);
+            var deviceKey = GetDeviceKey(e.Session);
+            var key = GetKey(deviceKey, item);
+            _playbacks.TryGetValue(key, out var playback);
+
+            if (FromOtherDevice(playback, e.Users, item, deviceKey) is { } accepted)
+            {
+                // A device woke up and reported a playback another device has moved past since.
+                playback = CreateFromAccepted(item, e.Users, e.Session, deviceKey, accepted);
+                _playbacks[key] = playback;
+            }
 
             // The state is kept after a stop: when the server stops a session that was paused for too long,
             // the client resumes without reporting a new start, and its next stop must still be checked.
-            if (!_playbacks.TryGetValue(GetKey(e.Session, item), out var playback))
+            if (playback is null)
             {
                 return;
             }
@@ -258,7 +304,7 @@ public sealed class SeekGuardService : IHostedService
                 }
                 else
                 {
-                    playback.TakeSnapshots(_userDataManager);
+                    Accept(playback);
                 }
 
                 playback.IsStopped = true;
@@ -275,11 +321,10 @@ public sealed class SeekGuardService : IHostedService
         try
         {
             // The state is kept: a client closing its connection (a browser tab, for example) may still send its
-            // stop report after the session has ended. Stale entries are dropped on a later playback start.
-            var prefix = e.SessionInfo.Id + ":";
-            foreach (var pair in _playbacks.Where(p => p.Key.StartsWith(prefix, StringComparison.Ordinal)))
+            // stop report after the session has ended.
+            var sessionId = e.SessionInfo.Id;
+            foreach (var playback in _playbacks.Values.Where(p => p.SessionId == sessionId))
             {
-                var playback = pair.Value;
                 lock (playback)
                 {
                     if (!playback.IsStopped && (playback.State.IsGuarding || playback.State.IsAwaitingResume))
@@ -298,7 +343,18 @@ public sealed class SeekGuardService : IHostedService
         }
     }
 
-    private TrackedPlayback CreatePlayback(BaseItem item, IReadOnlyList<User> users, long positionTicks)
+    // Returns the state another device saved after this device's last report, if there is one.
+    private AcceptedState? FromOtherDevice(TrackedPlayback? playback, IReadOnlyList<User> users, BaseItem item, string deviceKey)
+    {
+        if (!_accepted.TryGetValue((users[0].Id, item.Id), out var accepted) || accepted.DeviceKey == deviceKey)
+        {
+            return null;
+        }
+
+        return playback is null || playback.State.LastSeenUtc < accepted.SavedUtc ? accepted : null;
+    }
+
+    private TrackedPlayback CreatePlayback(BaseItem item, IReadOnlyList<User> users, SessionInfo session, string deviceKey, long positionTicks, bool waitingForStart = false)
     {
         var now = DateTime.UtcNow;
         var snapshots = new Dictionary<Guid, UserDataSnapshot>();
@@ -315,13 +371,45 @@ public sealed class SeekGuardService : IHostedService
         }
 
         var resumeTicks = snapshots.Values.FirstOrDefault()?.PlaybackPositionTicks;
-        var playback = new TrackedPlayback(item, users.ToArray(), new PlaybackState(positionTicks, now, resumeTicks));
-        foreach (var pair in snapshots)
+        return new TrackedPlayback(item, users.ToArray(), session.Id, deviceKey, new PlaybackState(positionTicks, now, resumeTicks), snapshots)
         {
-            playback.Snapshots[pair.Key] = pair.Value;
+            WaitingForStart = waitingForStart
+        };
+    }
+
+    // Starts tracking as if this device were at the position another device last saved, so that its report
+    // counts as a seek away from it.
+    private TrackedPlayback CreateFromAccepted(BaseItem item, IReadOnlyList<User> users, SessionInfo session, string deviceKey, AcceptedState accepted)
+    {
+        var snapshots = new Dictionary<Guid, UserDataSnapshot>();
+        foreach (var user in users)
+        {
+            if (_accepted.TryGetValue((user.Id, item.Id), out var userState))
+            {
+                snapshots[user.Id] = userState.Snapshot;
+            }
         }
 
-        return playback;
+        var state = new PlaybackState(accepted.Snapshot.PlaybackPositionTicks, DateTime.UtcNow);
+        return new TrackedPlayback(item, users.ToArray(), session.Id, deviceKey, state, snapshots);
+    }
+
+    // The current play state is legitimate: remember it as the state to fall back to.
+    private void Accept(TrackedPlayback playback)
+    {
+        var now = DateTime.UtcNow;
+        foreach (var user in playback.Users)
+        {
+            var data = _userDataManager.GetUserData(user, playback.Item);
+            if (data is null)
+            {
+                continue;
+            }
+
+            var snapshot = UserDataSnapshot.From(data);
+            playback.Snapshots[user.Id] = snapshot;
+            _accepted[(user.Id, playback.Item.Id)] = new AcceptedState(snapshot, playback.DeviceKey, now);
+        }
     }
 
     private void Restore(TrackedPlayback playback)
@@ -346,12 +434,13 @@ public sealed class SeekGuardService : IHostedService
 
     private void LogRestore(TrackedPlayback playback, string reason)
     {
-        var position = playback.Snapshots.Values.FirstOrDefault()?.PlaybackPositionTicks ?? 0;
+        var snapshot = playback.Snapshots.Values.FirstOrDefault();
         _logger.LogInformation(
-            "Seek Guard: {Reason} right after a seek in '{Item}', resume point kept at {Position}",
+            "Seek Guard: {Reason} before the new position in '{Item}' was watched, keeping {Position}{Played}",
             reason,
             playback.Item.Name,
-            TimeSpan.FromTicks(position));
+            TimeSpan.FromTicks(snapshot?.PlaybackPositionTicks ?? 0),
+            snapshot?.Played == true ? " (played)" : string.Empty);
     }
 
     private void RemoveStale()
@@ -362,44 +451,48 @@ public sealed class SeekGuardService : IHostedService
             _playbacks.TryRemove(pair.Key, out _);
         }
 
+        foreach (var pair in _accepted.Where(p => now - p.Value.SavedUtc > _staleAfter))
+        {
+            _accepted.TryRemove(pair.Key, out _);
+        }
+
         foreach (var pair in _startSnapshots.Where(p => now - p.Value.SavedUtc > _startSnapshotLifetime))
         {
             _startSnapshots.TryRemove(pair.Key, out _);
         }
     }
 
+    private sealed record AcceptedState(UserDataSnapshot Snapshot, string DeviceKey, DateTime SavedUtc);
+
     private sealed class TrackedPlayback
     {
-        public TrackedPlayback(BaseItem item, IReadOnlyList<User> users, PlaybackState state)
+        public TrackedPlayback(BaseItem item, IReadOnlyList<User> users, string sessionId, string deviceKey, PlaybackState state, Dictionary<Guid, UserDataSnapshot> snapshots)
         {
             Item = item;
             Users = users;
+            SessionId = sessionId;
+            DeviceKey = deviceKey;
             State = state;
+            Snapshots = snapshots;
         }
 
         public BaseItem Item { get; }
 
         public IReadOnlyList<User> Users { get; }
 
+        public string SessionId { get; }
+
+        public string DeviceKey { get; }
+
         public PlaybackState State { get; }
 
-        public Dictionary<Guid, UserDataSnapshot> Snapshots { get; } = new();
+        public Dictionary<Guid, UserDataSnapshot> Snapshots { get; }
 
         public IReadOnlyList<MediaSegmentDto> Segments { get; set; } = [];
 
         public bool IsStopped { get; set; }
 
-        public void TakeSnapshots(IUserDataManager userDataManager)
-        {
-            foreach (var user in Users)
-            {
-                var data = userDataManager.GetUserData(user, Item);
-                if (data is not null)
-                {
-                    Snapshots[user.Id] = UserDataSnapshot.From(data);
-                }
-            }
-        }
+        public bool WaitingForStart { get; set; }
 
         // A forward jump that starts inside an intro/recap/credits segment and lands past its end is a skip button.
         public bool IsSegmentSkip(long fromTicks, long toTicks)

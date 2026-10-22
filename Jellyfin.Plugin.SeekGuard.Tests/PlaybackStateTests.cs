@@ -164,13 +164,45 @@ public class PlaybackStateTests
     }
 
     [Fact]
-    public void WatchingFromTheStartInsteadOfResumingEndsTheWait()
+    public void WatchingFromTheStartInsteadOfResumingIsConfirmedByWatching()
     {
         var state = new PlaybackState(0, At(0), resumeTicks: Sec(288));
 
-        Assert.Equal(Observation.AwaitingResume, state.Observe(Sec(20), At(20), _options));
-        Assert.Equal(Observation.Normal, state.Observe(Sec(30), At(30), _options));
+        Assert.Equal(Observation.AwaitingResume, state.Observe(Sec(5), At(5), _options));
+        Assert.Equal(Observation.GuardConfirmed, state.Observe(Sec(12), At(12), _options));
         Assert.False(state.IsAwaitingResume);
+        Assert.Equal(Observation.Normal, state.Observe(Sec(22), At(22), _options));
+    }
+
+    [Fact]
+    public void StartingFromAStaleCachedPositionNeedsConfirmation()
+    {
+        // The episode was finished elsewhere (resume point 0); this device starts where it was paused yesterday.
+        var state = new PlaybackState(Sec(2590), At(0), resumeTicks: 0);
+
+        Assert.True(state.IsAwaitingResume);
+        Assert.Equal(Observation.AwaitingResume, state.Observe(Sec(2592), At(2), _options));
+        Assert.True(state.IsAwaitingResume);
+    }
+
+    [Fact]
+    public void StartingAtZeroOnAFinishedItemIsNormal()
+    {
+        var state = new PlaybackState(0, At(0), resumeTicks: 0);
+
+        Assert.False(state.IsAwaitingResume);
+        Assert.Equal(Observation.Normal, state.Observe(Sec(10), At(10), _options));
+    }
+
+    [Fact]
+    public void AReportFarFromTheAcceptedPositionIsASeekEvenAfterAGap()
+    {
+        // A device that slept since yesterday wakes up: tracking restarts from the position another device saved,
+        // so the time it slept must not excuse the difference.
+        var state = new PlaybackState(0, At(0));
+
+        Assert.Equal(Observation.GuardStarted, state.Observe(Sec(2590), At(0.5), _options));
+        Assert.Equal(0, state.GuardedFromTicks);
     }
 
     [Fact]

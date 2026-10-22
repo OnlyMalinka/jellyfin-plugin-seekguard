@@ -26,8 +26,9 @@ public sealed class PlaybackState
         LastPositionTicks = positionTicks;
         LastSeenUtc = timestampUtc;
 
-        // Some clients start at 0 and seek to the resume point only after the player is ready.
-        if (resumeTicks > 0 && Math.Abs(positionTicks - resumeTicks.Value) > _resumeEarlyTolerance)
+        // Starting away from the saved resume point is treated like a seek. Some clients start at 0 and seek to
+        // the resume point only after the player is ready; others start from a position they cached long ago.
+        if (resumeTicks is long resume && Math.Abs(positionTicks - resume) > _resumeEarlyTolerance)
         {
             _awaitingResumeTicks = resumeTicks;
         }
@@ -82,6 +83,7 @@ public sealed class PlaybackState
             if (positionTicks >= resume - _resumeEarlyTolerance && positionTicks <= resume + options.MinJump.Ticks)
             {
                 _awaitingResumeTicks = null;
+                WatchedSinceSeekTicks = 0;
                 return Observation.Resumed;
             }
 
@@ -91,15 +93,18 @@ public sealed class PlaybackState
                 _awaitingResumeTicks = null;
                 from = resume;
             }
-            else if (positionTicks >= options.MinJump.Ticks)
-            {
-                // Watching from the start instead of resuming.
-                _awaitingResumeTicks = null;
-                return Observation.Normal;
-            }
             else
             {
-                return Observation.AwaitingResume;
+                // Watching from where the client started instead of the resume point: trust it once watched.
+                WatchedSinceSeekTicks += Math.Clamp(delta, 0, maxPlayed);
+                if (WatchedSinceSeekTicks < options.ConfirmAfter.Ticks)
+                {
+                    return Observation.AwaitingResume;
+                }
+
+                _awaitingResumeTicks = null;
+                WatchedSinceSeekTicks = 0;
+                return Observation.GuardConfirmed;
             }
         }
 
