@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.3
+
+- Fix: when a player lost its stream and started the episode again from the beginning (Jellyfin for Android does this), the resume point could be lost. The restart now keeps guarding the position from before the drop until the new position has been watched.
+
 ## 1.0.2
 
 - Fix: a device that wakes up with an old playback (a tablet left paused overnight, for example) could overwrite progress made on another device, turning a finished episode back into "in progress". Its report now counts as a seek away from the state the other device saved.

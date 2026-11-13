@@ -216,6 +216,36 @@ public class PlaybackStateTests
     }
 
     [Fact]
+    public void SeekAndResumeWaitAreUnconfirmedUntilWatched()
+    {
+        var seek = new PlaybackState(Sec(300), At(0));
+        Assert.False(seek.IsUnconfirmed);
+        seek.Observe(0, At(1), _options);
+        Assert.True(seek.IsUnconfirmed);
+        seek.Observe(Sec(11), At(12), _options);
+        Assert.False(seek.IsUnconfirmed);
+
+        var resume = new PlaybackState(0, At(0), resumeTicks: Sec(300));
+        Assert.True(resume.IsUnconfirmed);
+        resume.Observe(Sec(300), At(2), _options);
+        Assert.False(resume.IsUnconfirmed);
+    }
+
+    [Fact]
+    public void PlayerRestartingFromZeroDuringAGuardKeepsWaitingForTheGuardedPosition()
+    {
+        // The Android player lost its stream at 5:47 and started the episode again from 0, reporting a new start.
+        // The new playback is tracked from the position the old one was guarding, not from what the database held.
+        var before = new PlaybackState(Sec(347), At(0));
+        Assert.Equal(Observation.GuardStarted, before.Observe(0, At(1), _options));
+        Assert.True(before.IsUnconfirmed);
+
+        var restarted = new PlaybackState(0, At(1), resumeTicks: Sec(347));
+        Assert.Equal(Observation.AwaitingResume, restarted.Observe(Sec(3.4), At(4.5), _options));
+        Assert.True(restarted.IsAwaitingResume);
+    }
+
+    [Fact]
     public void ClockGoingBackwardsIsTolerated()
     {
         var state = new PlaybackState(Sec(600), At(10));

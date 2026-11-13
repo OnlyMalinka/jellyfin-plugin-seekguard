@@ -52,6 +52,9 @@ public sealed class PlaybackState
     /// <summary>Gets a value indicating whether the client has not reached the saved resume point yet.</summary>
     public bool IsAwaitingResume => _awaitingResumeTicks.HasValue;
 
+    /// <summary>Gets a value indicating whether the saved resume point is being protected from the current position.</summary>
+    public bool IsUnconfirmed => IsGuarding || IsAwaitingResume;
+
     /// <summary>
     /// Feeds a new position report into the state.
     /// </summary>

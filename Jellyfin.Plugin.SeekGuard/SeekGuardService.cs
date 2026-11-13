@@ -154,8 +154,26 @@ public sealed class SeekGuardService : IHostedService
             var playback = _playbacks.AddOrUpdate(
                 GetKey(deviceKey, item),
                 _ => CreatePlayback(item, e.Users, e.Session, deviceKey, position),
-                (_, existing) => existing.WaitingForStart ? existing : CreatePlayback(item, e.Users, e.Session, deviceKey, position));
-            playback.WaitingForStart = false;
+                (_, existing) => existing.WaitingForStart ? existing : Restart(existing, item, e.Users, e.Session, deviceKey, position));
+
+            lock (playback)
+            {
+                playback.WaitingForStart = false;
+                if (playback.IsRestartDuringGuard)
+                {
+                    playback.IsRestartDuringGuard = false;
+                    _logger.LogInformation(
+                        "Seek Guard: '{Item}' started again before the new position was watched, keeping {Position}",
+                        playback.Item.Name,
+                        TimeSpan.FromTicks(playback.Snapshots.Values.FirstOrDefault()?.PlaybackPositionTicks ?? 0));
+                }
+
+                if (playback.State.IsAwaitingResume)
+                {
+                    // The start may have saved a position read while the guard was being written back.
+                    Restore(playback);
+                }
+            }
 
             if (Config.TrustSegmentSkips)
             {
@@ -377,6 +395,34 @@ public sealed class SeekGuardService : IHostedService
         };
     }
 
+    // A new start on a device that is still playing the item. A player that recovers from a dropped stream may
+    // start the item again from 0 while a seek is unconfirmed (the drop itself looks like a seek to 0). The resume
+    // point read at the start cannot be trusted then: the start saves the play state concurrently with the progress
+    // report that the guard is reverting, and may capture the unguarded position. Keep guarding the old state.
+    private TrackedPlayback Restart(TrackedPlayback existing, BaseItem item, IReadOnlyList<User> users, SessionInfo session, string deviceKey, long positionTicks)
+    {
+        lock (existing)
+        {
+            if (existing.IsStopped || !existing.State.IsUnconfirmed || existing.Snapshots.Count == 0)
+            {
+                return CreatePlayback(item, users, session, deviceKey, positionTicks);
+            }
+
+            foreach (var user in users)
+            {
+                _startSnapshots.TryRemove((user.Id, item.Id), out _);
+            }
+
+            var snapshots = new Dictionary<Guid, UserDataSnapshot>(existing.Snapshots);
+            var resumeTicks = snapshots.Values.First().PlaybackPositionTicks;
+            return new TrackedPlayback(item, users.ToArray(), session.Id, deviceKey, new PlaybackState(positionTicks, DateTime.UtcNow, resumeTicks), snapshots)
+            {
+                Segments = existing.Segments,
+                IsRestartDuringGuard = true
+            };
+        }
+    }
+
     // Starts tracking as if this device were at the position another device last saved, so that its report
     // counts as a seek away from it.
     private TrackedPlayback CreateFromAccepted(BaseItem item, IReadOnlyList<User> users, SessionInfo session, string deviceKey, AcceptedState accepted)
@@ -493,6 +539,9 @@ public sealed class SeekGuardService : IHostedService
         public bool IsStopped { get; set; }
 
         public bool WaitingForStart { get; set; }
+
+        // Created by a start that arrived while the previous playback on this device was still guarding.
+        public bool IsRestartDuringGuard { get; set; }
 
         // A forward jump that starts inside an intro/recap/credits segment and lands past its end is a skip button.
         public bool IsSegmentSkip(long fromTicks, long toTicks)
